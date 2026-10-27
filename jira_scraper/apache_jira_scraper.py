@@ -40,42 +40,42 @@ RPC_TIMEOUT_KEYWORDS = [
 ]
 
 INCLUSION_PATTERNS: dict[str, list[str]] = {
-    "configuracion_valor": [
+    "value_configuration": [
         r"\b(?:increase|decrease|raise|lower|reduce|change|set|configure|default)\w*\b.{0,80}\btimeout\b",
         r"\btimeout\b.{0,80}\b(?:increase|decrease|raise|lower|reduce|change|set|configure|default)\w*\b",
         r"\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|s|sec|seconds?|m|min|minutes?)\b",
     ],
-    "justificacion": [
+    "reasoning": [
         r"\b(?:because|since|therefore|thus|so that|in order to|reason|rationale|why)\b",
         r"\b(?:too low|too high|too short|too long|aggressive|conservative)\b",
         r"\b(?:client expects?|expected by the client|from the client perspective)\b",
     ],
-    "rendimiento_tradeoff": [
+    "performance_tradeoff": [
         r"\b(?:latency|throughput|performance|overhead|load|workload|queue|contention|resource)\b",
         r"\b(?:trade[- ]?off|impact|degrad|regression|slow(?:er)?|fast(?:er)?)\w*\b",
     ],
-    "experimento_evidencia": [
+    "evidence": [
         r"\b(?:benchmark|experiment|test result|stress test|load test|measurement|measured|observed|production)\b",
         r"\b(?:p50|p90|p95|p99|percentile|average latency|mean latency)\b",
     ],
-    "mecanismo_timeout": [
+    "timeout_mechanism": [
         r"\b(?:deadline|remaining timeout|timeout budget|propagat\w* timeout|elapsed time)\b",
         r"\b(?:readrpctimeout|writerpctimeout|rangerpctimeout|rpc timeout|request timeout|response timeout)\b",
     ],
 }
 
 EXCLUSION_PATTERNS: dict[str, list[str]] = {
-    "solo_pruebas_ci": [
+    "only_test": [
         r"\b(?:jenkins|circleci|github actions|buildkite|maven|gradle)\b.{0,80}\btimeout\b",
         r"\b(?:unit test|integration test|test suite|flaky test|dtest)\b.{0,80}\btimeout\b",
     ],
-    "solo_logs_o_error": [
+    "only_logs": [
         r"\b(?:stack trace|stacktrace|exception log|log message)\b",
     ],
-    "ui_o_usuario": [
+    "ui_user": [
         r"\b(?:gui|user interface|browser|web ui|screen|user input)\b.{0,80}\btimeout\b",
     ],
-    "proceso_local_no_rpc": [
+    "not_rpc": [
         r"\b(?:local lock|mutex|semaphore|thread join|sleep timeout|process timeout)\b",
     ],
 }
@@ -89,7 +89,7 @@ REAL_FIX_RESOLUTIONS = {"Fixed", "Done", "Implemented"}
 
 
 class JiraScraperError(RuntimeError):
-    """Error controlado producido al consultar Jira."""
+    """Error: GET Jira API."""
 
 
 def nested_name(value: Any) -> str | None:
@@ -311,32 +311,32 @@ def evaluate_selection_criteria(
         if keyword.lower() != "timeout"
     )
 
-    has_value_change = "configuracion_valor" in inclusion_hits
+    has_value_change = "value_configuration" in inclusion_hits
 
     has_reasoning = any(
         category in inclusion_hits
         for category in (
-            "justificacion",
-            "rendimiento_tradeoff",
-            "experimento_evidencia",
-            "mecanismo_timeout",
+            "reasoning",
+            "performance_tradeoff",
+            "evidence",
+            "timeout_mechanism",
         )
     )
 
     score = 0
     score += 3 if has_rpc_timeout else 0
-    score += 3 if "configuracion_valor" in inclusion_hits else 0
-    score += 3 if "justificacion" in inclusion_hits else 0
-    score += 2 if "rendimiento_tradeoff" in inclusion_hits else 0
-    score += 2 if "experimento_evidencia" in inclusion_hits else 0
+    score += 3 if "value_configuration" in inclusion_hits else 0
+    score += 3 if "reasoning" in inclusion_hits else 0
+    score += 2 if "performance_tradeoff" in inclusion_hits else 0
+    score += 2 if "evidence" in inclusion_hits else 0
     score += 1 if timeout_values else 0
 
     strong_exclusion = any(
         category in exclusion_hits
         for category in (
-            "solo_pruebas_ci",
-            "ui_o_usuario",
-            "proceso_local_no_rpc",
+            "only_test",
+            "ui_user",
+            "not_rpc",
         )
     )
 
@@ -354,40 +354,25 @@ def evaluate_selection_criteria(
         and has_real_fix
         and not strong_exclusion
     )
-
+    
     if included:
         decision_reason = (
-            "Incluida: contiene evidencia de timeout RPC, "
-            "un cambio de configuración/valor, razonamiento de apoyo, "
-            f"y tiene fix o todavía no se resolvió "
-            f"(status={issue.get('status')!r}, "
-            f"resolution={resolution!r})."
+            f"Included: contians evidence on RPC timeout, a configuration or value change, "
+            f"reasoning and has a fix or is not resolved yet"
+            f"(status={issue.get('status')!r}, resolution={issue.get('resolution')!r})."
         )
     elif strong_exclusion:
-        decision_reason = (
-            "Excluida: el contexto coincide con un "
-            "criterio fuerte de exclusión."
-        )
+        decision_reason = "Excluded: context matches with a strong exclusion criteria."
     elif not has_rpc_timeout:
-        decision_reason = (
-            "Excluida: no hay evidencia suficiente de "
-            "que sea un timeout RPC."
-        )
+        decision_reason = "Excluded: there is no enough evidence that supports the current issue to be RPC timeout related."
     elif not has_value_change:
-        decision_reason = (
-            "Excluida: no se discute un cambio de "
-            "valor/configuración del timeout."
-        )
+        decision_reason = "Excluded: there is no discussion about a value or configuration change."
     elif not has_reasoning:
-        decision_reason = (
-            "Excluida: hay cambio de configuración, "
-            "pero no explica por qué o con qué evidencia."
-        )
+        decision_reason = "Excluded: there is a configuration change but there is no discussion or reasoning."
     else:
         decision_reason = (
-            "Excluida: se cerró sin un fix real "
-            f"(status={issue.get('status')!r}, "
-            f"resolution={resolution!r})."
+            f"Excluded: Closed without a real fix"
+            f"(status={issue.get('status')!r}, resolution={issue.get('resolution')!r})."
         )
 
     return {
@@ -509,8 +494,8 @@ class ApacheJiraClient:
                     )
 
                     print(
-                        f"\nJira limitó las peticiones (HTTP 429). "
-                        f"Esperando {retry_after}s..."
+                        f"\nJira limited requests (HTTP 429). "
+                        f"Waiting {retry_after}s..."
                     )
 
                     time.sleep(retry_after)
@@ -521,10 +506,10 @@ class ApacheJiraClient:
                         wait = self._backoff(attempt)
 
                         print(
-                            f"\nJira respondió HTTP "
+                            f"\nJira returned HTTP "
                             f"{response.status_code}. "
-                            f"Reintentando en {wait}s "
-                            f"(intento {attempt}/{self.max_retries})..."
+                            f"Retrying in {wait}s "
+                            f"(Try {attempt}/{self.max_retries})..."
                         )
 
                         time.sleep(wait)
@@ -536,7 +521,7 @@ class ApacheJiraClient:
                     data = response.json()
                 except ValueError as exc:
                     raise JiraScraperError(
-                        "Jira no devolvió JSON válido."
+                        "Jira did not return a valid JSON."
                     ) from exc
 
                 if self.delay_seconds:
@@ -547,18 +532,18 @@ class ApacheJiraClient:
             except requests.RequestException as exc:
                 if attempt >= self.max_retries:
                     raise JiraScraperError(
-                        "No se pudo conectar con Jira después de "
-                        f"{self.max_retries} intentos: {exc}"
+                        "Couldnt connect to JIRA after "
+                        f"{self.max_retries} trials: {exc}"
                     ) from exc
 
                 wait = self._backoff(attempt)
 
                 print(
-                    f"\nConexión con Jira falló: {exc}"
+                    f"\nJira connection failed: {exc}"
                 )
                 print(
-                    f"Reintentando en {wait}s "
-                    f"(intento {attempt}/{self.max_retries})..."
+                    f"Retrying in {wait}s "
+                    f"(trial {attempt}/{self.max_retries})..."
                 )
 
                 self._reset_session()
@@ -566,7 +551,7 @@ class ApacheJiraClient:
                 time.sleep(wait)
 
         raise JiraScraperError(
-            "No se pudo obtener respuesta de Jira."
+            "Couldnt get a response from Jira"
         )
 
     def search_issue_keys(
@@ -625,9 +610,9 @@ class ApacheJiraClient:
             )
 
             print(
-                f"\rIssues encontradas: {len(keys)} "
-                f"(posiciones {start_at + 1}-{current_start} "
-                f"de {total})",
+                f"\nFound issues: {len(keys)} "
+                f"(Positions {start_at + 1}-{current_start} "
+                f"out of {total})",
                 end="",
                 flush=True,
             )
@@ -663,12 +648,12 @@ class ApacheJiraClient:
                     }
 
                     print(
-                        f"Checkpoint recuperado: "
-                        f"{len(matches)} issues únicas."
+                        f"Checkpoint saved: "
+                        f"{len(matches)} unique issues."
                     )
             except (OSError, json.JSONDecodeError) as exc:
                 print(
-                    f"Aviso: no se pudo leer el checkpoint: {exc}"
+                    f"Warning: could not get checkpoint: {exc}"
                 )
 
         project = project.strip().upper()
@@ -679,7 +664,7 @@ class ApacheJiraClient:
         ):
             print(
                 f"\n[{index}/{len(keywords)}] "
-                f"Buscando palabra clave: {keyword!r}"
+                f"Looking for keyword: {keyword!r}"
             )
 
             safe_keyword = (
@@ -715,8 +700,8 @@ class ApacheJiraClient:
                 )
 
                 print(
-                    f"Checkpoint guardado: "
-                    f"{len(matches)} issues únicas."
+                    f"Checkpoint saved: "
+                    f"{len(matches)} unique issues."
                 )
 
         return matches
@@ -946,7 +931,7 @@ def build_jql(
 
     if not project:
         raise ValueError(
-            "El proyecto no puede estar vacío."
+            "The project cannot be empty."
         )
 
     jql = f'project = "{project}"'
@@ -988,8 +973,8 @@ def guess_project_folder(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Descarga issues desde Apache Jira "
-            "y las guarda en JSON y CSV."
+            "Downloading "
+            "and saving in JSON and CSV."
         )
     )
 
@@ -1041,6 +1026,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--filter-criteria",
         action="store_true",
+        default=True
     )
 
     parser.add_argument(
@@ -1072,19 +1058,20 @@ def validate_args(
     args: argparse.Namespace,
 ) -> str | None:
     if args.limit is not None and args.limit <= 0:
-        return "--limit debe ser mayor que cero."
+        return "Error: --limit has to be above 0."
+
 
     if (
         args.limit_per_keyword is not None
         and args.limit_per_keyword <= 0
     ):
         return (
-            "--limit-per-keyword debe ser mayor que cero."
+            "Error: --limit-per-keyword has to be above 0."
         )
 
     if args.start <= 0:
         return (
-            "--start debe ser mayor que cero."
+         "Error: --start has to be above 0."
         )
 
     if (
@@ -1092,7 +1079,7 @@ def validate_args(
         and args.end < args.start
     ):
         return (
-            "--end debe ser mayor o igual que --start."
+           "Error: --end has to be greater or equal than --start."
         )
 
     if (
@@ -1100,7 +1087,7 @@ def validate_args(
         and args.limit is not None
     ):
         return (
-            "No combines --limit con --start/--end."
+           "Error: cannot combine --limit with --start/--end"
         )
 
     if (
@@ -1111,19 +1098,18 @@ def validate_args(
         )
     ):
         return (
-            "--start/--end no está soportado junto "
-            "con --rpc-timeouts."
+            "Error: --start/--end is not supported with --rpc-timeouts. Use --limit-per-keyword and/or --limit instead"
         )
 
     if args.text and not args.project:
         return (
-            "--text solo puede utilizarse junto con "
+            "--text can only be joined with "
             "--project."
         )
 
     if args.max_retries <= 0:
         return (
-            "--max-retries debe ser mayor que cero."
+            "--max-retries has to be above 0."
         )
 
     return None
@@ -1197,15 +1183,15 @@ def load_existing_issues(
         json.JSONDecodeError,
     ) as exc:
         print(
-            f"Aviso: no se pudo recuperar "
+            f"Warning: could not recover "
             f"{json_path}: {exc}"
         )
         return []
 
     if not isinstance(data, list):
         print(
-            f"Aviso: {json_path} no contiene una lista. "
-            "Se empieza desde cero."
+            f"Warning: {json_path} does not contain a list. "
+            "Starting from zero."
         )
         return []
 
@@ -1296,8 +1282,8 @@ def main() -> int:
                 issue_keys = issue_keys[:args.limit]
 
             print(
-                "\nIssues únicas después de "
-                f"eliminar duplicados: {len(issue_keys)}"
+                "\nUnique issues after "
+                f"deleting duplicates: {len(issue_keys)}"
             )
 
         else:
@@ -1310,7 +1296,7 @@ def main() -> int:
             )
 
         if not issue_keys:
-            print("No se encontraron issues.")
+            print("Could not find issues.")
             return 0
 
         if args.no_resume:
@@ -1330,8 +1316,8 @@ def main() -> int:
 
         if downloaded_by_key:
             print(
-                f"\nCheckpoint de issues recuperado: "
-                f"{len(downloaded_by_key)} ya descargadas."
+                f"\nCheckpoint recovered: "
+                f"{len(downloaded_by_key)} already downloaded."
             )
 
         for index, issue_key in enumerate(
@@ -1341,13 +1327,13 @@ def main() -> int:
             if issue_key in downloaded_by_key:
                 print(
                     f"[{index}/{len(issue_keys)}] "
-                    f"{issue_key} ya existe. Saltando."
+                    f"{issue_key} exists. Skipping."
                 )
                 continue
 
             print(
                 f"[{index}/{len(issue_keys)}] "
-                f"Descargando {issue_key}..."
+                f"Downloading {issue_key}..."
             )
 
             normalized = normalize_issue(
@@ -1378,7 +1364,7 @@ def main() -> int:
             )
 
             print(
-                f"    ✓ Guardado "
+                f"Saved "
                 f"({len(normalized_issues)}/{len(issue_keys)})"
             )
 
@@ -1395,9 +1381,9 @@ def main() -> int:
             filtered_csv_path=filtered_csv_path,
         )
 
-        print("\nProceso terminado.")
+        print("\nFinished.")
         print(
-            f"Issues descargadas: "
+            f"Downloaded issues: "
             f"{len(normalized_issues)}"
         )
         print(
@@ -1417,15 +1403,15 @@ def main() -> int:
             )
 
             print(
-                f"Issues incluidas por criterios: "
+                f"Issues included by criteria: "
                 f"{filtered_count}"
             )
             print(
-                "JSON filtrado: "
+                "Filtered JSON: "
                 f"{filtered_json_path.resolve()}"
             )
             print(
-                "CSV filtrado: "
+                "Filtered CSV: "
                 f"{filtered_csv_path.resolve()}"
             )
 
@@ -1438,25 +1424,23 @@ def main() -> int:
         )
 
         print(
-            "\nIMPORTANTE: el progreso anterior "
-            "ya quedó guardado en disco."
+            "\Important: earlier process already saved"
         )
 
         print(
-            f"Puedes volver a ejecutar el mismo comando "
-            f"para continuar desde lo descargado."
+            f"You can execute the same command to resume"
         )
 
         return 1
 
     except KeyboardInterrupt:
         print(
-            "\nProceso cancelado por el usuario.",
+            "\Process canceled by the user.",
             file=sys.stderr,
         )
 
         print(
-            "El progreso ya descargado quedó guardado."
+            "Process downloaded and saved."
         )
 
         return 130
