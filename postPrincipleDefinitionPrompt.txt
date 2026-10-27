@@ -1,0 +1,261 @@
+Notes for readers:
+The following prompt was used after the manual classification had been done, to get more ideas on how to describe the developer wisdom embedded in the 38 studied issues. The response (copied below) did not change our classification, though we did find some of the framing of the argument useful when writing our paper; none of the text has been used directly in our writeup.
+
+Prompt: Consider the reasoning that can be extracted from developer discussions and patches in Apache Jiras. Help me analyze the issues in the attached file and generalize the developer wisdom into actionable heuristics or principles regarding RPC timeouts (their design, configuration and implementation).
+
+Response (ChatGPT, clean context, default model, free tier):
+# Developer Wisdom on RPC Timeouts: Principles Extracted from Apache JIRA Issues
+
+## Scope and evidence note
+
+The supplied file contains 38 Apache JIRA identifiers across Cassandra, Hadoop, HBase, HDFS, Hive, Flink, Ratis, Solr, Spark, and ZooKeeper. It contains issue identifiers, not the discussions, patches, or resolution details themselves.
+
+The principles below are therefore a synthesis of established distributed-systems engineering knowledge and selected JIRA discussions that were referenced in the preceding analysis. They should not be interpreted as a verified, issue-by-issue extraction from all 38 tickets. For a rigorous evidence-based synthesis, each issue should be checked against its problem statement, developer discussion, patch, and tests.
+
+## 1. Core principles
+
+### Principle 1 — A timeout must represent a specific operation and its failure semantics
+
+Do not use one undifferentiated timeout for connection establishment, RPC response waiting, heartbeat-based failure detection, long-running streaming, and cluster recovery. These operations have different expectations and different consequences when they time out.
+
+SOLR-13457 proposes categorizing timeouts into feature-instance, optional-feature, global-system, node-specific, and client timeouts. It argues against hard-coded timeout values and proposes consistent configuration and documentation.
+
+### Principle 2 — Choose timeouts according to the operation's expected duration and purpose
+
+A timeout appropriate for a heartbeat may be inappropriate for a streaming transfer or a distributed recovery operation. A timeout that is too short creates false failures; one that is too long delays failure detection and resource reclamation.
+
+SOLR-12047 reports core initialization failures because a ZooKeeper state wait of three seconds was insufficient for larger clusters. The proposed change increased the wait to ten seconds. SOLR-13532 similarly discusses a one-second ping timeout that could prevent core recovery under network or commit-related delays.
+
+### Principle 3 — Keep periodicity, response deadlines, and failure-detection thresholds conceptually separate
+
+A heartbeat interval specifies how frequently a process sends a signal. An RPC timeout bounds waiting for a response. A failure detector decides when a peer should be considered unavailable. These values interact, but they do not mean the same thing.
+
+SPARK-12411 identifies a mismatch between a ten-second executor heartbeat interval and a 120-second network timeout used for failure checking, observing that a network problem could leave only one heartbeat attempt before failure detection.
+
+### Principle 4 — Make timeouts configurable through a coherent, discoverable system
+
+Configuration is not just adding a number to a configuration file. Developers need to know which setting governs which operation, where it belongs, what overrides it, and whether changing it affects clients, servers, or both.
+
+SOLR-13457 calls out the accumulated cost of ad hoc timeout configuration. SPARK-33143 documents a socket timeout increased from three to fifteen seconds but still hard-coded, motivating a configurable value after failures in real workloads.
+
+### Principle 5 — A timeout must bound resource consumption, not merely stop waiting
+
+When an RPC times out, consider what happens to the outstanding request, socket, connection, worker thread, queued work, buffers, and eventual response. A caller that has stopped waiting does not imply that the server has stopped working.
+
+CASSANDRA-3569 discusses the distinction between long-running streaming operations and short-lived requests, including the risk of terminating a stream because of a failure-detector event and the opposite risk of a connection that appears alive while making no progress.
+
+### Principle 6 — Treat a timeout as an ambiguous outcome, not proof that the operation failed
+
+The remote side might never have received the request, might still be processing it, or might have completed it while the reply was delayed or lost. Retrying can therefore duplicate effects unless the operation is idempotent or protected by deduplication.
+
+This is a general distributed-systems deduction, not a claim directly established by the JIRA examples above. It should be checked against the retry and request-processing code before attributing it to a particular Apache patch.
+
+## 2. Distinguish timeout mechanisms
+
+A recurring source of bugs is using the word *timeout* for different mechanisms that happen to measure time.
+
+| Timeout mechanism | What it bounds | Typical failure if designed poorly |
+|---|---|---|
+| Connection timeout | Establishing a connection | Slow startup or blocked connection attempts |
+| RPC response timeout | Waiting for a particular response | False failures or indefinite waiting |
+| Socket read timeout | Waiting for the next read to make progress | Broken or unusable connections; partial-message problems |
+| Overall operation deadline | Total time allowed for the operation | Work continues beyond the caller's useful budget |
+| Heartbeat timeout | Time without an expected heartbeat | False node failure or slow failure detection |
+| Streaming idle/keepalive timeout | Detecting an inactive or broken long-lived connection | Streams hang indefinitely or are terminated prematurely |
+| Recovery/state-wait timeout | Waiting for a distributed state transition | Startup or recovery fails under normal cluster load |
+
+This is a synthesized taxonomy, not a verbatim taxonomy from one ticket. Solr's timeout-management proposal is particularly relevant to making such categories explicit.
+
+### Practical rule: configure the right layer
+
+Suppose an RPC spends two seconds connecting, three seconds waiting in a server queue, and four seconds executing. A five-second *overall deadline* should not be implemented as five independent seconds allowed at every stage. Otherwise, the operation may last much longer than the caller intended.
+
+Use a shared deadline or remaining-time budget:
+
+`T_remaining = D_absolute - t_now`
+
+Each stage should consume the remaining budget, not restart the full timeout.
+
+This is a recommended implementation pattern, not a claim that all the listed Apache patches adopted deadline propagation.
+
+## 3. Deadline propagation is a distributed-systems correctness issue
+
+SOLR-17926 describes distributed Solr queries in which the coordinator spends part of the allowed time processing a request locally and then gives shard requests the full original time allowance. Consequently, the coordinator can time out even though all shard requests succeed. The proposed fix uses a common starting point for all phases, while noting that using an absolute timestamp across nodes introduces clock-synchronization concerns.
+
+This yields three actionable rules:
+
+1. **Start the clock at the logical operation boundary.** Do not silently restart the timeout when work moves to another component.
+2. **Propagate the remaining budget.** Before sending a downstream request, account for time already spent upstream.
+3. **Choose a clock model deliberately.** Use monotonic time for measuring elapsed time within a process. If absolute deadlines must cross machines, define how clock skew is handled or use a protocol that transmits a remaining duration.
+
+A useful model for a multi-hop RPC is:
+
+`T_total = T_queue + T_connect + T_execute + T_response`
+
+The total must fit within the operation's deadline, subject to explicitly defined cancellation and cleanup behavior.
+
+## 4. A timeout is also a resource-management policy
+
+CASSANDRA-7886 documents a failure pattern in which requests continue arriving while operations wait for timeouts, so pending requests can accumulate and exhaust heap memory. The discussion considers whether failures should be returned immediately instead of waiting for timeouts and also raises the need to bound connections.
+
+The lesson is not simply to choose shorter timeouts. Design the whole system so that timeouts help contain overload.
+
+### Recommended timeout lifecycle
+
+1. **Accept work within resource limits.** Bound queues, concurrent requests, and outstanding RPCs.
+2. **Track each request's deadline.** Keep its timeout associated with the correct request and lifecycle.
+3. **On timeout, complete the caller's future or callback exactly once.** Late responses must not complete it a second time.
+4. **Cancel or abandon downstream work when safe.** If cancellation cannot be guaranteed, prevent abandoned work from consuming unbounded resources.
+5. **Clean up state.** Release callbacks, timers, buffers, connection references, and request-tracking entries.
+6. **Apply backpressure.** Avoid admitting unlimited new work simply because previous callers have timed out.
+
+A timeout should be treated as a lifecycle transition, not merely as an exception thrown by a timer.
+
+### Important implementation hazard: socket timeouts
+
+HBASE-7013 illustrates why a socket read timeout can have consequences beyond the intended RPC. If a timeout occurs in the middle of reading a message, the stream may be left misaligned. Reusing the same connection without safely recovering the remainder of the message can corrupt subsequent reads.
+
+**Practical heuristic:** distinguish an RPC-level deadline from a transport-level read timeout. If a transport timeout leaves message framing or connection state uncertain, close or discard the connection rather than blindly reusing it.
+
+## 5. Failure detection and long-lived connections need different policies
+
+A distributed system may need both fast failure detection and reliable completion of long-running work. These goals can conflict.
+
+CASSANDRA-3569 discusses why a failure detector intended for latency-sensitive requests should not automatically terminate long-running streaming connections. A TCP connection can also appear alive while no progress is being made.
+
+Actionable principles:
+
+- **Use failure detectors for the decisions they are designed to support.** A peer suspected of being unavailable is not necessarily equivalent to a transport connection that must immediately be destroyed.
+- **Distinguish silence from failure.** A long-running operation may legitimately have no application-level messages for an extended period.
+- **Detect genuinely stalled connections.** TCP keepalive, protocol-level heartbeats, read deadlines, and application progress checks solve different problems.
+- **Avoid turning transient network disturbances into irreversible state transitions.** Where possible, allow recovery or retry without falsely declaring the entire operation invalid.
+- **Do not wait indefinitely just because the connection exists.** A half-open connection can remain established even when useful communication is no longer possible.
+
+For heartbeat-based systems, evaluate the timeout against the heartbeat interval and the number of missed heartbeats tolerated. SPARK-12411 highlights an undesirable interaction between heartbeat frequency and a much longer network timeout.
+
+There is no universally correct multiplier between these values: failure-detection latency, expected scheduling pauses, network variability, and the cost of false positives all matter.
+
+## 6. Configuration should be a deliberate public contract
+
+SOLR-13457 moves beyond individual timeout bugs and addresses the configuration system itself. Its proposal distinguishes five categories:
+
+| Category | Recommended configuration location |
+|---|---|
+| Feature-instance timeout | Configuration of that feature instance |
+| Optional-feature timeout | Configuration that enables or controls the feature |
+| Global-system timeout | Shared system-level configuration |
+| Node-specific timeout | Node-level property, if the setting truly differs per node |
+| Client timeout | Client API and client configuration, with defined precedence |
+
+These are categories proposed in the JIRA, not a claim that every category was fully implemented. The issue also asks that documentation specify what each timeout affects, its permitted maximum, and the handling of zero and negative values.
+
+### Recommended configuration rules
+
+- **No unexplained magic numbers.** Every timeout should have a named constant or a documented configuration setting.
+- **Make defaults intentional.** Defaults should reflect the operation's role and expected environment, not merely the value used by an existing call site.
+- **Define precedence.** If a global setting and a feature-specific setting both exist, users should be able to predict which one wins.
+- **Validate values at startup.** Reject invalid configurations with a clear message rather than allowing failures deep inside an RPC implementation.
+- **Define zero and negative semantics.** For example, does zero mean no waiting, use the default, or wait indefinitely? These behaviors must be explicit.
+- **Document scope and units.** State whether a value governs connection establishment, individual requests, the overall operation, or idle connections, and specify its units.
+- **Test configuration wiring.** Verify that changing the setting actually changes the timeout used by the relevant code path.
+
+SPARK-33143 reinforces the point about configuration wiring: a timeout had already been increased from three to fifteen seconds, but the value remained hard-coded, and real-world failures motivated making it configurable.
+
+A configurable timeout is not useful if a builder ignores it, a client wrapper overrides it, or the actual transport never receives it.
+
+## 7. Error reporting is part of timeout design
+
+SPARK-31233 addresses a diagnostic problem: RPC timeout messages lacked the destination address in a client-only endpoint scenario. The proposed solution uses the client's address when the endpoint's own RPC address is null.
+
+For actionable timeout diagnostics, log or expose:
+
+- The operation or RPC method.
+- The destination endpoint, when known.
+- The configured timeout and its configuration source.
+- Elapsed time and remaining deadline, if applicable.
+- The stage that timed out: connecting, sending, waiting, reading, or executing.
+- Whether the request was cancelled, remains in progress, or may have completed remotely.
+- Retry count and the reason for retrying.
+- Whether the connection was reused, discarded, or re-established.
+
+Not every field needs to appear in every log line. Correlated structured logs, metrics, and traces are generally more useful than excessively verbose exception messages.
+
+**Diagnostic rule:** an exception saying only “timed out after 120 seconds” is much less actionable than one identifying the operation, destination, timeout source, and stage.
+
+## 8. RPC timeout code-review checklist
+
+### Semantics
+- [ ] Define exactly what the timeout bounds.
+- [ ] Distinguish per-attempt timeouts from the overall operation deadline.
+- [ ] Define what timeout means for the caller and for remote execution.
+
+### Timing
+- [ ] Use a monotonic clock for local elapsed-time calculations.
+- [ ] Propagate the remaining budget across RPC hops.
+- [ ] Account for queueing, connection establishment, execution, and response time.
+
+### Failure handling
+- [ ] Distinguish timeout, transport failure, remote exception, and node unavailability.
+- [ ] Ensure late replies cannot complete an operation twice.
+- [ ] Make retry behavior safe for non-idempotent operations.
+
+### Resources
+- [ ] Bound outstanding requests, queues, and retries.
+- [ ] Clean up timers, callbacks, buffers, and request state.
+- [ ] Discard a connection when its protocol state is no longer trustworthy.
+
+### Configuration
+- [ ] Provide a documented default and explicit units.
+- [ ] Define configuration precedence and zero/negative-value behavior.
+- [ ] Validate values and verify that configuration reaches the actual transport.
+
+### Testing and observability
+- [ ] Test delayed responses, lost replies, and disconnected peers.
+- [ ] Test late responses, cancellation, retries, and cleanup.
+- [ ] Test overload and recovery, and log enough context to identify the cause.
+
+## 9. Turning the 38 issues into an evidence-based body of knowledge
+
+The analysis above establishes several concrete lessons, but it does not establish that every one of the 38 tickets supports them. For a rigorous synthesis, classify each issue by its actual problem statement, developer reasoning, patch, and tests rather than assign it a principle based on its title alone.
+
+A useful evidence matrix would include:
+
+| Field | What to extract |
+|---|---|
+| JIRA and project | Issue ID, affected component, version |
+| Failure scenario | What happened, under what workload or conditions |
+| Root cause | What the code or configuration did incorrectly |
+| Developer argument | Why the proposed fix was preferred over alternatives |
+| Patch behavior | What changed in implementation |
+| Tests | Which failure modes and edge cases were verified |
+| Trade-off | What behavior improved and what new risk was introduced |
+| Generalized principle | A reusable engineering rule |
+| Confidence | Explicitly stated, demonstrated by a patch, or inferred |
+
+This matters when developer comments disagree. Cassandra discussions, for example, show tension between terminating requests quickly, avoiding unnecessary implementation complexity, and protecting a cluster from unbounded outstanding work. That disagreement is valuable evidence: there is often no universally optimal timeout, only a choice among failure modes and costs.
+
+### Suggested investigation order
+
+1. **Timeout semantics and configuration:** SOLR-13457, SPARK-33143, SPARK-12411.
+2. **Deadline propagation and distributed execution:** SOLR-17926, RATIS-1790.
+3. **Transport failure and connection lifecycle:** CASSANDRA-3569, CASSANDRA-15066.
+4. **Resource exhaustion and failure handling:** CASSANDRA-7886, HBASE-7013.
+5. **Recovery, initialization, and diagnostics:** SOLR-12047, SOLR-13532, SPARK-31233.
+
+This is an investigation order based on the retrieved issue content and the breadth of the design questions—not a ranking of severity or a completed review of all tickets.
+
+## Conclusion
+
+An RPC timeout is not just a duration. It is a contract governing how long an operation may consume resources, how far its work may proceed, what the caller is entitled to conclude when the deadline expires, and how the system recovers afterward.
+
+The strongest reusable principles are:
+
+1. **Specify the semantics before choosing the duration.**
+2. **Use end-to-end deadlines when an operation spans multiple stages or nodes.**
+3. **Separate RPC timeouts from heartbeats, failure detectors, and transport keepalives.**
+4. **Treat timeout handling as resource cleanup and overload control.**
+5. **Make configuration consistent, validated, documented, and observable.**
+6. **Design for ambiguous outcomes, late responses, and safe retries.**
+7. **Test the failure lifecycle, not just whether an exception is thrown at the expected time.**
+
+These principles provide a starting point for an RPC timeout design standard. Stronger evidence would come from tracing each of the 38 supplied JIRAs through its developer discussions, patch, and regression tests, then recording which principles each issue actually supports.
